@@ -1,0 +1,15 @@
+<IfModule mod_rewrite.c>
+    Options -MultiViews
+    RewriteEngine On
+
+    # Sudah di dalam /public — jangan redirect lagi
+    RewriteRule ^public/ - [L]
+
+    # File/folder yang real di root, biarkan
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # Semua request lain → teruskan ke public/
+    RewriteRule ^(.*)$ public/$1 [L,QSA]
+</IfModule>
