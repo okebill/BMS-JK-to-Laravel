@@ -38,10 +38,10 @@
 #include <ModbusMaster.h>
 
 // ==================== Configuration ====================
-const char* ssid       = "eglobaltech.id";
-const char* password   = "14081992";
-const char* serverURL  = "https://bms.okebil.com/api/monitor/store";
-const char* logURL     = "https://bms.okebil.com/api/monitor/log";
+const char* ssid       = "WIFI ANDA";
+const char* password   = "PASSWORD WIFI ANDA";
+const char* serverURL  = "https://web.kamu.com/api/monitor/store";
+const char* logURL     = "https://web.kamu.com/api/monitor/log";
 const char* deviceId   = "ESP32-001";
 const char* apiKey     = "";
 
