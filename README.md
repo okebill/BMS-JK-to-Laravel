@@ -124,7 +124,7 @@ php artisan serve
 ```cpp
 const char* ssid      = "NAMA_WIFI_ANDA";
 const char* password  = "PASSWORD_WIFI";
-const char* serverURL = "https://domain-anda.com/api/monitor/store";
+const char* serverURL = "https://web.kamu.com/api/monitor/store";
 const char* deviceId  = "ESP32-001";
 ```
 
@@ -161,6 +161,17 @@ Content-Type: application/json
   }
 }
 ```
+---
+
+## DI APLIKASI BMS JK (bluetooth)
+Buka aplikasi bawaan BMS JK
+ke menu seting
+Pilih UART Protocol 001 - JK BMS RS485 Modbus v1.0
+
+---
+
+
+
 
 ---
 
