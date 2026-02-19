@@ -35,37 +35,30 @@ Atau klik tombol **Code → Download ZIP** di halaman repository.
 
 **Via cPanel File Manager:**
 
-1. Login ke **cPanel** hosting Anda
-2. Buka **File Manager**
-3. Masuk ke folder `public_html/`
-4. Klik **Upload** → upload file `.zip`
-5. Klik kanan pada file `.zip` → **Extract**
+1. Login ke **cPanel** hosting Anda.
+2. Buka **File Manager**.
+3. Masuk ke folder root domain/subdomain Anda (misal `public_html/` atau `biling.okebil.net/`).
+4. Klik **Upload** → upload file `.zip`.
+5. Klik kanan pada file `.zip` → **Extract**.
 
-**Atau via FTP (FileZilla, WinSCP):**
-1. Connect ke server FTP hosting Anda
-2. Upload dan ekstrak file `.zip` ke `public_html/`
-
-> **Struktur yang benar setelah ekstrak:**
-> ```
-> public_html/
-> ├── app/
-> ├── bootstrap/
-> ├── config/
-> ├── database/
-> ├── public/
-> │   ├── index.php  ← file utama Laravel
-> │   ├── install.php ← installer
-> │   └── .htaccess
-> ├── resources/
-> ├── routes/
-> ├── storage/
-> ├── vendor/
-> └── ...
-> ```
+> **⚠️ PENTING: FOLDER VENDOR**
+> Jika Anda mendownload langsung dari GitHub, folder `vendor` **tidak ada**. Anda harus:
+> - **Opsi A (SSH):** Jalankan `composer install --no-dev` di folder project.
+> - **Opsi B (Manual):** Jalankan `composer install` di laptop Anda, lalu zip dan upload folder `vendor` ke hosting.
 
 ---
 
-### 3. Buat Database MySQL di cPanel
+### 3. Set Document Root (WAJIB)
+
+Agar Laravel berjalan dengan benar dan aman, Anda **HARUS** mengarahkan domain ke folder `public`.
+
+**Cara di cPanel:**
+1. Buka menu **Domains** (atau Subdomains).
+2. Klik **Manage** pada domain yang digunakan.
+3. Cari kolom **Document Root**.
+4. Tambahkan `/public` di bagian akhir path.
+   - Contoh: `/biling.okebil.net` → `/biling.okebil.net/public`
+5. Klik **Update**.
 
 1. Login ke **cPanel**
 2. Buka **MySQL Databases** (atau MySQL Database Wizard)
@@ -170,9 +163,10 @@ const char* deviceId  = "ESP32-001";
 ## Troubleshooting Shared Hosting
 
 ### Error 500 saat buka website
-- Cek apakah PHP 8.2 sudah aktif di cPanel → MultiPHP Manager
-- Pastikan file `.env` ada di folder root (dibuat otomatis oleh installer)
-- Pastikan `storage/` dan `bootstrap/cache/` permission `755`
+- **Cek Folder `vendor`**: Pastikan folder `vendor` sudah ada dan berisi library. Jika download dari GitHub, folder ini kosong secara default.
+- **Cek Versi PHP**: Pastikan PHP 8.2+ sudah aktif.
+- **Cek APP_KEY**: Pastikan file `.env` sudah memiliki `APP_KEY`.
+- **Permissions**: Pastikan `storage/` dan `bootstrap/cache/` permission `755`.
 
 ### Installer tidak bisa tulis .env
 - Pastikan folder root project bisa ditulis (755)
