@@ -57,7 +57,7 @@ Agar Laravel berjalan dengan benar dan aman, Anda **HARUS** mengarahkan domain k
 2. Klik **Manage** pada domain yang digunakan.
 3. Cari kolom **Document Root**.
 4. Tambahkan `/public` di bagian akhir path.
-   - Contoh: `/biling.okebil.net` → `/biling.okebil.net/public`
+   - Contoh: `/web.kamu.com` → `/web.kamu.com/public`
 5. Klik **Update**.
 
 1. Login ke **cPanel**
@@ -72,7 +72,7 @@ Agar Laravel berjalan dengan benar dan aman, Anda **HARUS** mengarahkan domain k
 ### 4. Buat Database Baru dengan AUTO INSTALLER.
 
 > **Cara termudah:** Buka browser, ketik URL Anda lalu `/install.php`
-> Contoh: `https://bms.domain.com/install.php`
+> Contoh: `https://web.kamu.com/install.php`
 
 Installer akan memandu Anda langkah demi langkah:
 
@@ -152,7 +152,7 @@ const char* deviceId  = "ESP32-001";
 
 | Field | Nilai |
 |-------|-------|
-| **URL** | `https://domain-anda.com/login` |
+| **URL** | `https://web.kamu.com/login` |
 | **Email** | `bms@okebil.com` |
 | **Password** | `123456789` |
 
