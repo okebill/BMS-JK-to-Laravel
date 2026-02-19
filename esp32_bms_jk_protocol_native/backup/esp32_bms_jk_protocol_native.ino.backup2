@@ -1,0 +1,660 @@
+/*
+ * ESP32 JK-BMS Full Configuration Sync dengan Laravel
+ * 
+ * Features:
+ * - WiFi Connection dengan Mario Bros Theme
+ * - Modbus RTU untuk membaca semua BMS settings (0x1000+)
+ * - HTTP POST ke Laravel API dengan bms_settings
+ * - Memproses commands dari Laravel untuk write register
+ * - Buzzer Feedback (Mario Theme + Coin Sound)
+ * 
+ * Wiring:
+ * - BMS GPS Port TX → ESP32 RX (GPIO 14)
+ * - BMS GPS Port RX → ESP32 TX (GPIO 27)
+ * - GND → GND
+ * - Buzzer → GPIO 4
+ * 
+ * BMS Settings:
+ * - UART1 Protocol: 001 - JK BMS RS485 Modbus V1.0
+ * - Device Addr.: 1
+ * - UART1 Baudrate: 115200
+ * 
+ * Library Required:
+ * - ModbusMaster by Doc Walker
+ * - ArduinoJson by Benoit Blanchon
+ */
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <ModbusMaster.h>
+
+// ==================== WiFi Configuration ====================
+const char* ssid = "eglobaltech.id";
+const char* password = "14081992";
+
+// ==================== Laravel API Configuration ====================
+const char* serverURL = "https://bms.okebil.com/api/monitor/store";
+const char* logURL = "https://bms.okebil.com/api/monitor/log";
+const char* deviceId = "ESP32-001";
+const char* apiKey = "";
+
+// ==================== Serial Configuration ====================
+#define SERIAL_BAUDRATE 115200
+#define BMS_BAUDRATE 115200
+#define BMS_RX_PIN 14  // ESP32 RX menerima dari BMS TX
+#define BMS_TX_PIN 27  // ESP32 TX mengirim ke BMS RX
+
+// ==================== Buzzer Configuration ====================
+#define BUZZER_PIN 4
+
+// ==================== BMS Modbus Configuration ====================
+#define BMS_SLAVE_ID 1
+
+// ==================== Timing Configuration ====================
+#define BMS_REQUEST_INTERVAL 8000  // Request setiap 8 detik
+#define BMS_SETTINGS_READ_INTERVAL 60000  // Baca settings setiap 60 detik
+#define WIFI_RECONNECT_INTERVAL 30000
+
+// ==================== State Variables ====================
+unsigned long lastBMSRequest = 0;
+unsigned long lastBMSSettingsRead = 0;
+unsigned long lastWiFiCheck = 0;
+bool wifiConnected = false;
+bool wifiMelodyPlayed = false;
+
+// ==================== Modbus Object ====================
+ModbusMaster nodeBMS;
+HardwareSerial SerialBMS(1);
+
+// ==================== BMS Data Structure ====================
+struct BMSData {
+  // Real-time data
+  float totalVoltage = 0.0;
+  float current = 0.0;
+  uint8_t soc = 0;
+  float cellVoltages[32] = {0};
+  uint8_t cellCount = 0;
+  float batteryTemp = 0.0;
+  bool valid = false;
+  
+  // Settings (dari holding registers 0x1000+)
+  JsonObject settings;
+} bmsData;
+
+// ==================== Buzzer Melodies ====================
+const int marioTheme[] = {
+  659, 659, 0, 659, 0, 523, 659, 0, 784, 0, 392, 0, 523, 0, 392, 0, 330, 0, 440, 0, 494, 0, 466, 0, 392, 0, 659, 0, 784, 0, 880, 0, 988, 0, 1047, 0
+};
+const int marioThemeDurations[] = {
+  150, 150, 150, 150, 150, 150, 150, 150, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300
+};
+const int marioThemeLength = sizeof(marioTheme) / sizeof(marioTheme[0]);
+
+
+// ==================== Helper Functions ====================
+void playTone(int frequency, int duration) {
+  if (frequency == 0) {
+    delay(duration);
+    return;
+  }
+  
+  int period = 1000000 / frequency;
+  int halfPeriod = period / 2;
+  unsigned long startTime = millis();
+  
+  while ((millis() - startTime) < duration) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delayMicroseconds(halfPeriod);
+    digitalWrite(BUZZER_PIN, LOW);
+    delayMicroseconds(halfPeriod);
+  }
+  
+  digitalWrite(BUZZER_PIN, LOW);
+  delay(10);
+}
+
+void playMarioTheme() {
+  Serial.println("[BUZZER] Playing Mario Bros Theme...");
+  for (int i = 0; i < marioThemeLength; i++) {
+    playTone(marioTheme[i], marioThemeDurations[i]);
+  }
+  Serial.println("[BUZZER] Mario Theme finished");
+}
+
+String getModbusErrorString(uint8_t result) {
+  switch(result) {
+    case 0x00: return "Success";
+    case 0x01: return "Illegal Function";
+    case 0x02: return "Illegal Data Address";
+    case 0x03: return "Illegal Data Value";
+    case 0x04: return "Slave Device Failure";
+    case 0xE0: return "Invalid Response / CRC Error";
+    case 0xE1: return "Invalid Function Code";
+    case 0xE2: return "Response Timeout (No Response)";
+    case 0xE3: return "Invalid Slave ID";
+    default: return "Unknown Error (" + String(result) + ")";
+  }
+}
+
+// ==================== WiFi Functions ====================
+void connectWiFi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!wifiConnected) {
+      wifiConnected = true;
+      Serial.println();
+      Serial.println("========================================");
+      Serial.println("✅ WiFi CONNECTED!");
+      Serial.print("IP Address: ");
+      Serial.println(WiFi.localIP());
+      Serial.println("========================================");
+      
+      if (!wifiMelodyPlayed) {
+        playMarioTheme();
+        wifiMelodyPlayed = true;
+      }
+    }
+    return;
+  }
+  
+  wifiConnected = false;
+  wifiMelodyPlayed = false;
+  
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(ssid);
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiConnected = true;
+    Serial.println();
+    Serial.println("✅ WiFi Connected!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    playMarioTheme();
+    wifiMelodyPlayed = true;
+  } else {
+    Serial.println();
+    Serial.println("❌ WiFi Connection Failed!");
+  }
+}
+
+// ==================== Modbus Functions ====================
+void preTransmission() {
+  // Clear buffer before transmission
+  while(SerialBMS.available()) {
+    SerialBMS.read();
+  }
+}
+
+void postTransmission() {
+  delay(10);  // Small delay after transmission
+}
+
+// Forward declaration
+void sendLogToLaravel(const char* message, const char* level = "info");
+
+// ==================== BMS Settings Reading ====================
+bool readAllBMSSettings(JsonObject& settingsObj) {
+  Serial.println("[BMS] Reading all settings from holding registers...");
+  
+  // Register map berdasarkan file 1.txt (0x1000 - 0x1084)
+  // Kita baca dalam beberapa batch untuk menghindari timeout
+  
+  bool success = true;
+  uint8_t result;
+  
+  // Batch 1: Voltage Settings (0x1000 - 0x1028)
+  uint16_t registers[] = {
+    0x1000, 0x1004, 0x1008, 0x100C, 0x1010, 0x1014, 0x1018, 0x101C, 0x1020, 0x1024, 0x1028
+  };
+  const char* names[] = {
+    "smart_sleep", "cell_uvp", "cell_uvpr", "cell_ovp", "cell_ovpr", 
+    "balance_trigger", "soc_100", "soc_0", "cell_rcv", "cell_rfv", "system_power_off"
+  };
+  
+  for (int i = 0; i < 11; i++) {
+    result = nodeBMS.readHoldingRegisters(registers[i], 2);
+    delay(100);
+    
+    if (result == 0x00) {
+      uint32_t value = (nodeBMS.getResponseBuffer(0) << 16) | nodeBMS.getResponseBuffer(1);
+      settingsObj[names[i]] = value * 0.001;  // Convert mV to V
+      Serial.print("  ");
+      Serial.print(names[i]);
+      Serial.print(": ");
+      Serial.println(value * 0.001, 3);
+    } else {
+      Serial.print("  ❌ Failed to read ");
+      Serial.print(names[i]);
+      Serial.print(": ");
+      Serial.println(getModbusErrorString(result));
+      success = false;
+    }
+  }
+  
+  // Batch 2: Current Settings (0x102C - 0x1048)
+  uint16_t currentRegs[] = {0x102C, 0x1038, 0x1048};
+  const char* currentNames[] = {"charge_coc", "discharge_coc", "max_balance_current"};
+  
+  for (int i = 0; i < 3; i++) {
+    result = nodeBMS.readHoldingRegisters(currentRegs[i], 2);
+    delay(100);
+    
+    if (result == 0x00) {
+      uint32_t value = (nodeBMS.getResponseBuffer(0) << 16) | nodeBMS.getResponseBuffer(1);
+      settingsObj[currentNames[i]] = value * 0.001;  // Convert mA to A
+    } else {
+      Serial.print("  ❌ Failed to read ");
+      Serial.println(currentNames[i]);
+      success = false;
+    }
+  }
+  
+  // Batch 3: Temperature Settings (0x104C - 0x1068)
+  uint16_t tempRegs[] = {0x104C, 0x1050, 0x1054, 0x1058, 0x105C, 0x1060, 0x1064, 0x1068};
+  const char* tempNames[] = {
+    "charge_otp", "charge_otpr", "discharge_otp", "discharge_otpr",
+    "charge_utp", "charge_utpr", "mos_otp", "mos_otpr"
+  };
+  
+  for (int i = 0; i < 8; i++) {
+    result = nodeBMS.readHoldingRegisters(tempRegs[i], 2);
+    delay(100);
+    
+    if (result == 0x00) {
+      int32_t value = (int32_t)((nodeBMS.getResponseBuffer(0) << 16) | nodeBMS.getResponseBuffer(1));
+      settingsObj[tempNames[i]] = value * 0.1;  // Convert 0.1°C to °C
+    } else {
+      Serial.print("  ❌ Failed to read ");
+      Serial.println(tempNames[i]);
+      success = false;
+    }
+  }
+  
+  // Batch 4: Battery Capacity & Balance (0x106C, 0x107C, 0x1084)
+  result = nodeBMS.readHoldingRegisters(0x106C, 2);
+  delay(100);
+  if (result == 0x00) {
+    uint32_t cellCount = (nodeBMS.getResponseBuffer(0) << 16) | nodeBMS.getResponseBuffer(1);
+    settingsObj["cell_count"] = cellCount;
+  }
+  
+  result = nodeBMS.readHoldingRegisters(0x107C, 2);
+  delay(100);
+  if (result == 0x00) {
+    uint32_t capacity = (nodeBMS.getResponseBuffer(0) << 16) | nodeBMS.getResponseBuffer(1);
+    settingsObj["battery_capacity"] = capacity * 0.001;  // Convert mAh to Ah
+  }
+  
+  result = nodeBMS.readHoldingRegisters(0x1084, 2);
+  delay(100);
+  if (result == 0x00) {
+    uint32_t balanceStart = (nodeBMS.getResponseBuffer(0) << 16) | nodeBMS.getResponseBuffer(1);
+    settingsObj["balance_start_voltage"] = balanceStart * 0.001;  // Convert mV to V
+  }
+  
+  return success;
+}
+
+// ==================== BMS Real-time Data Reading ====================
+bool readBMSRealTimeData() {
+  uint8_t result;
+  
+  // Read Total Voltage (0x1290)
+  result = nodeBMS.readHoldingRegisters(0x1290, 2);
+  delay(100);
+  if (result == 0x00) {
+    uint32_t voltage = (nodeBMS.getResponseBuffer(0) << 16) | nodeBMS.getResponseBuffer(1);
+    bmsData.totalVoltage = voltage * 0.001;  // mV to V
+  } else {
+    Serial.print("[BMS] Failed to read voltage: ");
+    Serial.println(getModbusErrorString(result));
+    return false;
+  }
+  
+  // Read Current (0x1298)
+  result = nodeBMS.readHoldingRegisters(0x1298, 2);
+  delay(100);
+  if (result == 0x00) {
+    int32_t current = (int32_t)((nodeBMS.getResponseBuffer(0) << 16) | nodeBMS.getResponseBuffer(1));
+    bmsData.current = current * 0.001;  // mA to A
+  }
+  
+  // Read SOC (0x12A6 - lower byte)
+  result = nodeBMS.readHoldingRegisters(0x12A6, 1);
+  delay(100);
+  if (result == 0x00) {
+    bmsData.soc = nodeBMS.getResponseBuffer(0) & 0xFF;
+  }
+  
+  // Read Cell Voltages (0x1200 - 0x121E for 16 cells)
+  result = nodeBMS.readHoldingRegisters(0x1200, 32);  // 16 cells * 2 registers
+  delay(100);
+  if (result == 0x00) {
+    bmsData.cellCount = 0;
+    for (int i = 0; i < 16; i++) {
+      uint16_t cellVoltage = nodeBMS.getResponseBuffer(i * 2);
+      if (cellVoltage > 0) {
+        bmsData.cellVoltages[i] = cellVoltage * 0.001;  // mV to V
+        bmsData.cellCount++;
+      }
+    }
+  }
+  
+  // Read Battery Temperature (0x129C)
+  result = nodeBMS.readHoldingRegisters(0x129C, 1);
+  delay(100);
+  if (result == 0x00) {
+    int16_t temp = (int16_t)nodeBMS.getResponseBuffer(0);
+    bmsData.batteryTemp = temp * 0.1;  // 0.1°C to °C
+  }
+  
+  bmsData.valid = true;
+  return true;
+}
+
+// ==================== Command Processing ====================
+bool processCommands(JsonArray commands) {
+  Serial.println("[BMS] Processing commands from Laravel...");
+  
+  bool allSuccess = true;
+  
+  for (JsonObject cmd : commands) {
+    String type = cmd["type"].as<String>();
+    
+    if (type == "bms_write_register") {
+      uint16_t reg = cmd["register"].as<uint16_t>();
+      uint16_t value = cmd["value"].as<uint16_t>();
+      
+      Serial.print("  Writing register 0x");
+      Serial.print(reg, HEX);
+      Serial.print(" = ");
+      Serial.println(value);
+      
+      uint8_t result = nodeBMS.writeSingleRegister(reg, value);
+      delay(100);
+      
+      if (result == 0x00) {
+        Serial.println("    ✅ Success");
+        String msg = "Write register 0x" + String(reg, HEX) + " = " + String(value) + " - Success";
+        sendLogToLaravel(msg.c_str(), "info");
+      } else {
+        Serial.print("    ❌ Failed: ");
+        Serial.println(getModbusErrorString(result));
+        String msg = "Write register 0x" + String(reg, HEX) + " - Failed: " + getModbusErrorString(result);
+        sendLogToLaravel(msg.c_str(), "error");
+        allSuccess = false;
+      }
+    } else if (type == "bms_write_multiple_registers") {
+      uint16_t reg = cmd["register"].as<uint16_t>();
+      JsonArray values = cmd["values"].as<JsonArray>();
+      
+      uint16_t count = values.size();
+      
+      // Set transmit buffer untuk ModbusMaster
+      nodeBMS.setTransmitBuffer(0, count);
+      for (int i = 0; i < count; i++) {
+        nodeBMS.setTransmitBuffer(i, values[i].as<uint16_t>());
+      }
+      
+      Serial.print("  Writing multiple registers starting at 0x");
+      Serial.print(reg, HEX);
+      Serial.print(" (");
+      Serial.print(count);
+      Serial.println(" registers)");
+      
+      uint8_t result = nodeBMS.writeMultipleRegisters(reg, count);
+      delay(100);
+      
+      if (result == 0x00) {
+        Serial.println("    ✅ Success");
+        String msg = "Write multiple registers 0x" + String(reg, HEX) + " - Success";
+        sendLogToLaravel(msg.c_str(), "info");
+      } else {
+        Serial.print("    ❌ Failed: ");
+        Serial.println(getModbusErrorString(result));
+        String msg = "Write multiple registers 0x" + String(reg, HEX) + " - Failed: " + getModbusErrorString(result);
+        sendLogToLaravel(msg.c_str(), "error");
+        allSuccess = false;
+      }
+    }
+  }
+  
+  return allSuccess;
+}
+
+// ==================== HTTP Functions ====================
+void sendDataToLaravel() {
+  if (!wifiConnected || !bmsData.valid) {
+    return;
+  }
+  
+  HTTPClient http;
+  http.begin(serverURL);
+  http.addHeader("Content-Type", "application/json");
+  if (strlen(apiKey) > 0) {
+    http.addHeader("Authorization", "Bearer " + String(apiKey));
+  }
+  
+  DynamicJsonDocument doc(4096);
+  doc["device_id"] = deviceId;
+  
+  // Inverter object (required by Laravel)
+  JsonObject inverter = doc.createNestedObject("inverter");
+  inverter["pv_voltage"] = (float)0.0;
+  inverter["pv_current"] = (float)0.0;
+  inverter["ac_voltage"] = (float)0.0;
+  inverter["load_power"] = (float)0.0;
+  
+  // BMS object
+  JsonObject bms = doc.createNestedObject("bms");
+  bms["battery_voltage"] = bmsData.totalVoltage;
+  bms["current"] = bmsData.current;
+  bms["soc"] = bmsData.soc;
+  bms["temperature"] = bmsData.batteryTemp;
+  bms["cell_count"] = bmsData.cellCount;
+  
+  JsonArray cellVoltages = bms.createNestedArray("cell_voltages");
+  for (int i = 0; i < bmsData.cellCount; i++) {
+    cellVoltages.add(bmsData.cellVoltages[i]);
+  }
+  
+  // BMS Settings (jika sudah dibaca)
+  if (!bmsData.settings.isNull()) {
+    JsonObject bmsSettings = bms.createNestedObject("bms_settings");
+    for (JsonPair kv : bmsData.settings) {
+      bmsSettings[kv.key().c_str()] = kv.value();
+    }
+  }
+  
+  String jsonPayload;
+  serializeJson(doc, jsonPayload);
+  
+  Serial.println("[HTTP] Sending data to Laravel API...");
+  
+  int httpResponseCode = http.POST(jsonPayload);
+  
+  if (httpResponseCode > 0) {
+    String response = http.getString();
+    
+    if (httpResponseCode == 200 || httpResponseCode == 201) {
+      Serial.print("[HTTP] ✅ Success! Response code: ");
+      Serial.println(httpResponseCode);
+      
+      // Parse response untuk commands
+      DynamicJsonDocument responseDoc(2048);
+      DeserializationError error = deserializeJson(responseDoc, response);
+      
+      if (!error && responseDoc.containsKey("commands")) {
+        JsonArray commands = responseDoc["commands"];
+        if (commands.size() > 0) {
+          Serial.println("[HTTP] Commands received from Laravel, processing...");
+          processCommands(commands);
+        }
+      }
+    } else {
+      Serial.print("[HTTP] ⚠️ Response code: ");
+      Serial.println(httpResponseCode);
+    }
+  } else {
+    Serial.print("[HTTP] ❌ Error code: ");
+    Serial.println(httpResponseCode);
+  }
+  
+  http.end();
+}
+
+void sendLogToLaravel(const char* message, const char* level = "info") {
+  if (!wifiConnected) {
+    return;
+  }
+  
+  HTTPClient http;
+  http.begin(logURL);
+  http.addHeader("Content-Type", "application/json");
+  
+  DynamicJsonDocument doc(512);
+  doc["device_id"] = deviceId;
+  doc["message"] = message;
+  doc["level"] = level;
+  doc["timestamp"] = millis();
+  
+  String jsonPayload;
+  serializeJson(doc, jsonPayload);
+  
+  int httpResponseCode = http.POST(jsonPayload);
+  http.end();
+}
+
+// ==================== Setup ====================
+void setup() {
+  Serial.begin(SERIAL_BAUDRATE);
+  delay(1000);
+  
+  Serial.println("\n\n");
+  Serial.println("========================================");
+  Serial.println("ESP32 JK-BMS Full Configuration Sync");
+  Serial.println("========================================");
+  Serial.println();
+  
+  // Initialize Buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+  
+  // Initialize Serial1 for BMS Modbus
+  SerialBMS.begin(BMS_BAUDRATE, SERIAL_8N1, BMS_RX_PIN, BMS_TX_PIN);
+  delay(500);
+  
+  // Initialize Modbus
+  nodeBMS.begin(BMS_SLAVE_ID, SerialBMS);
+  nodeBMS.preTransmission(preTransmission);
+  nodeBMS.postTransmission(postTransmission);
+  
+  Serial.println("[INIT] Serial1 initialized (RX=14, TX=27)");
+  Serial.println("[INIT] Modbus RTU initialized (Slave ID: 1, Baudrate: 115200)");
+  Serial.println("[INIT] Buzzer initialized (GPIO 4)");
+  Serial.print("[INIT] Device ID: ");
+  Serial.println(deviceId);
+  Serial.print("[INIT] API URL: ");
+  Serial.println(serverURL);
+  Serial.println();
+  
+  // Connect WiFi
+  connectWiFi();
+  
+  if (wifiConnected) {
+    sendLogToLaravel("ESP32 started and connected to WiFi", "info");
+  }
+  
+  Serial.println();
+  Serial.println("========================================");
+  Serial.println("System Ready!");
+  Serial.println("========================================");
+  Serial.println();
+}
+
+// ==================== Loop ====================
+void loop() {
+  // Check WiFi connection periodically
+  if (millis() - lastWiFiCheck >= WIFI_RECONNECT_INTERVAL) {
+    lastWiFiCheck = millis();
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[WiFi] Connection lost, reconnecting...");
+      wifiConnected = false;
+      wifiMelodyPlayed = false;
+      connectWiFi();
+    }
+  }
+  
+  // Read BMS real-time data periodically
+  if (millis() - lastBMSRequest >= BMS_REQUEST_INTERVAL) {
+    lastBMSRequest = millis();
+    
+    Serial.println();
+    Serial.println("----------------------------------------");
+    Serial.println("[BMS] Reading real-time data...");
+    
+    if (readBMSRealTimeData()) {
+      Serial.println("[BMS] ✅ Data received!");
+      Serial.print("  Voltage: ");
+      Serial.print(bmsData.totalVoltage, 2);
+      Serial.println("V");
+      Serial.print("  Current: ");
+      Serial.print(bmsData.current, 2);
+      Serial.println("A");
+      Serial.print("  SOC: ");
+      Serial.print(bmsData.soc);
+      Serial.println("%");
+      Serial.print("  Cells: ");
+      Serial.println(bmsData.cellCount);
+      
+      // Send to Laravel
+      if (wifiConnected) {
+        sendDataToLaravel();
+      } else {
+        Serial.println("[HTTP] Skipped - WiFi not connected");
+      }
+    } else {
+      Serial.println("[BMS] ❌ Failed to read data");
+    }
+    
+    Serial.println("----------------------------------------");
+  }
+  
+  // Read BMS settings periodically (less frequent)
+  if (millis() - lastBMSSettingsRead >= BMS_SETTINGS_READ_INTERVAL) {
+    lastBMSSettingsRead = millis();
+    
+    Serial.println();
+    Serial.println("----------------------------------------");
+    Serial.println("[BMS] Reading all settings...");
+    
+    DynamicJsonDocument settingsDoc(2048);
+    JsonObject settingsObj = settingsDoc.to<JsonObject>();
+    
+    if (readAllBMSSettings(settingsObj)) {
+      Serial.println("[BMS] ✅ Settings read successfully!");
+      bmsData.settings = settingsObj;
+      
+      // Send settings to Laravel
+      if (wifiConnected) {
+        sendDataToLaravel();
+      }
+    } else {
+      Serial.println("[BMS] ⚠️ Some settings failed to read");
+    }
+    
+    Serial.println("----------------------------------------");
+  }
+  
+  delay(100);
+}
